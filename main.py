@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Response, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import time
 
@@ -9,6 +10,13 @@ latest_frame = None
 frame_lock = asyncio.Lock()
 frame_count = 0
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins= {'*'}, #adresse du frontend
+    allow_credentials=True,
+    allow_methods=['*'],
+    allow_headers=['*']
+)
 
 @app.post("/upload_frame")
 async def upload_frame(request: Request):

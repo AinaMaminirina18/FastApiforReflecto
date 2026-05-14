@@ -1,14 +1,9 @@
-from fastapi import FastAPI, Response, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response
+from typing import List
 import asyncio
-import time
+from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="ESP32-CAM Stream")
-
-latest_frame = None
-frame_lock = asyncio.Lock()
-frame_count = 0
+app = FastAPI(title="ESP32-CAM WebSocket Stream")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,71 +12,60 @@ app.add_middleware(
     allow_methods=['*'],
     allow_headers=['*']
 )
+# Gestion des connexions
+class ConnectionManager:
+    def __init__(self):
+        # Clients Web qui regardent le stream
+        self.active_connections: List[WebSocket] = []
+        self.latest_frame = None
 
-@app.post("/upload_frame")
-async def upload_frame(request: Request):
-    global latest_frame, frame_count
-   
-    content = await request.body()
-   
-    if len(content) < 1000:
-        return {"status": "error", "message": "Image trop petite"}
-   
-    async with frame_lock:
-        latest_frame = content
-        frame_count += 1
-   
-    print(f"✅ Frame reçu | Taille: {len(content)} octets | Total: {frame_count}")
-    return {"status": "success", "size": len(content), "count": frame_count}
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
 
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
 
-async def mjpeg_generator():
-    global latest_frame
-    while True:
-        async with frame_lock:
-            if latest_frame is None:
-                await asyncio.sleep(0.1)
-                continue
-            frame = latest_frame
-       
-        yield b"--frame\r\n"
-        yield b"Content-Type: image/jpeg\r\n"
-        yield f"Content-Length: {len(frame)}\r\n\r\n".encode()
-        yield frame
-        yield b"\r\n"
-       
-        await asyncio.sleep(0.05)
+    async def broadcast_frame(self, frame: bytes):
+        self.latest_frame = frame
+        # Envoie l'image à tous les navigateurs connectés
+        for connection in self.active_connections:
+            try:
+                await connection.send_bytes(frame)
+            except Exception:
+                # Supprime la connexion si elle est instable
+                self.active_connections.remove(connection)
 
+manager = ConnectionManager()
 
-@app.get("/stream")
-async def video_stream():
-    return StreamingResponse(mjpeg_generator(),
-                           media_type="multipart/x-mixed-replace; boundary=frame")
+# --- Endpoint pour l'ESP32 ---
+@app.websocket("/ws/esp32")
+async def websocket_endpoint_esp32(websocket: WebSocket):
+    await websocket.accept()
+    print("✅ ESP32 Connecté via WebSocket")
+    try:
+        while True:
+            # Reçoit les données binaires directement
+            data = await websocket.receive_bytes()
+            if len(data) > 1000:
+                await manager.broadcast_frame(data)
+    except WebSocketDisconnect:
+        print("❌ ESP32 Déconnecté")
 
+# --- Endpoint pour l'App Web ---
+@app.websocket("/ws/web")
+async def websocket_endpoint_web(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # On attend juste pour maintenir la connexion ouverte
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
 
+# --- Conservation du Snapshot (Optionnel) ---
 @app.get("/snapshot")
 async def snapshot():
-    async with frame_lock:
-        if latest_frame is None:
-            return {"message": "Aucune image reçue"}
-        return Response(content=latest_frame, media_type="image/jpeg")
-
-
-@app.get("/status")
-async def status():
-    async with frame_lock:
-        return {
-            "frames_received": frame_count,
-            "has_image": latest_frame is not None,
-            "image_size": len(latest_frame) if latest_frame else 0
-        }
-
-
-@app.get("/")
-async def home():
-    return """
-    <h1>ESP32-CAM Stream</h1>
-    <p><a href="/status" target="_blank">Status</a></p>
-    <p><a href="/snapshot" target="_blank">Snapshot</a></p>
-    <img src="/stream" style="max-width: 100%; border: 2px solid #333;"/>
-    """
+    if manager.latest_frame is None:
+        return {"message": "Aucune image reçue"}
+    return Response(content=manager.latest_frame, media_type="image/jpeg")

@@ -1,9 +1,10 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response
-from typing import List
-import asyncio
+
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="ESP32-CAM WebSocket Stream")
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
+
+app = FastAPI(title="ESP32 Cam WebsocketStream")
 
 app.add_middleware(
     CORSMiddleware,
@@ -12,12 +13,10 @@ app.add_middleware(
     allow_methods=['*'],
     allow_headers=['*']
 )
-# Gestion des connexions
+# Liste pour stocker les clients (navigateurs) connectés
 class ConnectionManager:
     def __init__(self):
-        # Clients Web qui regardent le stream
-        self.active_connections: List[WebSocket] = []
-        self.latest_frame = None
+        self.active_connections: list[WebSocket] = []
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -26,46 +25,54 @@ class ConnectionManager:
     def disconnect(self, websocket: WebSocket):
         self.active_connections.remove(websocket)
 
-    async def broadcast_frame(self, frame: bytes):
-        self.latest_frame = frame
-        # Envoie l'image à tous les navigateurs connectés
+    async def broadcast(self, message: bytes):
         for connection in self.active_connections:
-            try:
-                await connection.send_bytes(frame)
-            except Exception:
-                # Supprime la connexion si elle est instable
-                self.active_connections.remove(connection)
+            await connection.send_bytes(message)
 
 manager = ConnectionManager()
 
-# --- Endpoint pour l'ESP32 ---
+# Endpoint où l'ESP32 envoie ses images
 @app.websocket("/ws/esp32")
-async def websocket_endpoint_esp32(websocket: WebSocket):
+async def websocket_esp32(websocket: WebSocket):
     await websocket.accept()
-    print("✅ ESP32 Connecté via WebSocket")
     try:
         while True:
-            # Reçoit les données binaires directement
+            # Reçoit l'image brute de l'ESP32
             data = await websocket.receive_bytes()
-            if len(data) > 1000:
-                await manager.broadcast_frame(data)
+            # La renvoie à tous les navigateurs ouverts
+            await manager.broadcast(data)
     except WebSocketDisconnect:
-        print("❌ ESP32 Déconnecté")
+        print("ESP32 déconnecté")
 
-# --- Endpoint pour l'App Web ---
-@app.websocket("/ws/web")
-async def websocket_endpoint_web(websocket: WebSocket):
+# Endpoint pour les navigateurs (Visualisation)
+@app.websocket("/ws/client")
+async def websocket_client(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            # On attend juste pour maintenir la connexion ouverte
-            await websocket.receive_text()
+            await websocket.receive_text() # Maintient la connexion
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
-# --- Conservation du Snapshot (Optionnel) ---
-@app.get("/snapshot")
-async def snapshot():
-    if manager.latest_frame is None:
-        return {"message": "Aucune image reçue"}
-    return Response(content=manager.latest_frame, media_type="image/jpeg")
+# Page HTML simple pour voir le stream
+@app.get("/")
+async def get():
+    return HTMLResponse("""
+    <html>
+        <body>
+            <h1>Stream ESP32-CAM</h1>
+            <img id="stream" src="" style="width: 100%; max-width: 640px;">
+            <script>
+                const img = document.getElementById('stream');
+                // Remplace par ton URL Render (ex: ws://ton-app.render.com/ws/client)
+                const ws = new WebSocket('ws://' + window.location.host + '/ws/client');
+                ws.onmessage = function(event) {
+                    const url = URL.createObjectURL(event.data);
+                    img.src = url;
+                    // Libère la mémoire après le chargement de l'image
+                    img.onload = () => URL.revokeObjectURL(url);
+                };
+            </script>
+        </body>
+    </html>
+    """)

@@ -1,78 +1,109 @@
-
-from fastapi.middleware.cors import CORSMiddleware
-
+import asyncio
+import os
+from io import BytesIO
+from PIL import Image, UnidentifiedImageError
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import StreamingResponse
 
-app = FastAPI(title="ESP32 Cam WebsocketStream")
+app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins= {'*'}, #adresse du frontend
-    allow_credentials=True,
-    allow_methods=['*'],
-    allow_headers=['*']
-)
-# Liste pour stocker les clients (navigateurs) connectés
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
+# Variable globale pour stocker la dernière image valide en mémoire (ou sur disque)
+# Utiliser un verrou ou une simple variable suffit ici.
+latest_image_bytes = None
 
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
+import time
 
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+def get_placeholder_bytes():
+    """Charge l'image placeholder ou en crée une grise par défaut."""
+    try:
+        with open("placeholder.jpg", "rb") as f:
+            return f.read()
+    except Exception:
+        # Création de secours d'une image valide si placeholder.jpg manque
+        img = Image.new('RGB', (320, 240), color='gray')
+        buf = BytesIO()
+        img.save(buf, format='JPEG')
+        return buf.getvalue()
 
-    async def broadcast(self, message: bytes):
-        for connection in self.active_connections:
-            await connection.send_bytes(message)
+# Initialisation propre
+latest_image_bytes = get_placeholder_bytes()
 
-manager = ConnectionManager()
+def is_valid_image(image_bytes):
+    try:
+        Image.open(BytesIO(image_bytes))
+        return True
+    except UnidentifiedImageError:
+        print("image invalid")
+        return False
 
-# Endpoint où l'ESP32 envoie ses images
-@app.websocket("/ws/esp32")
-async def websocket_esp32(websocket: WebSocket):
+# --- 1. ROUTE WEBSOCKET (Remplace receive_stream.py) ---
+@app.websocket("/") # ou "/ws" selon ce que vous avez choisi
+async def websocket_endpoint(websocket: WebSocket):
+    global latest_image_bytes
     await websocket.accept()
+    print("ESP32 connected!")
     try:
         while True:
-            # Reçoit l'image brute de l'ESP32
-            data = await websocket.receive_bytes()
-            # La renvoie à tous les navigateurs ouverts
-            await manager.broadcast(data)
-    except WebSocketDisconnect:
-        print("ESP32 déconnecté")
+            # On récupère le message sous forme brute (message de type dict ou objet selon FastAPI)
+            message = await websocket.receive()
+            
+            # FastAPI/Starlette renvoie un dict avec 'bytes' ou 'text'
+            if "bytes" in message and message["bytes"]:
+                data = message["bytes"]
+            elif "text" in message and message["text"]:
+                # Si l'ESP32 envoie du texte par erreur ou encodé
+                data = message["text"].encode('utf-8')
+            else:
+                continue
 
-# Endpoint pour les navigateurs (Visualisation)
-@app.websocket("/ws/client")
-async def websocket_client(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        while True:
-            await websocket.receive_text() # Maintient la connexion
+            print(f"Received data length: {len(data)}")
+            
+            if len(data) > 5000 and is_valid_image(data):
+                latest_image_bytes = data
+                with open("image.jpg", "wb") as f:
+                    f.write(data)
+                print("image.jpg updated")
+                
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        print("ESP32 disconnected")
+    except Exception as e:
+        print(f"WebSocket error: {e}")
 
-# Page HTML simple pour voir le stream
+# --- 2. ROUTE HTTP STREAMING (Remplace send_image_stream.py) ---
+def generate_frames():
+    global latest_image_bytes
+    while True:
+        try:
+            # S'assurer qu'on a bien des octets valides
+            frame_data = latest_image_bytes if latest_image_bytes else get_placeholder_bytes()
+            
+            # Valider et réencoder proprement l'image en JPEG via Pillow
+            image = Image.open(BytesIO(frame_data))
+            img_io = BytesIO()
+            image.save(img_io, 'JPEG', quality=80)
+            img_bytes = img_io.getvalue()
+            
+            # Envoi du chunk au format MJPEG standard
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n'
+                   b'Content-Length: ' + f"{len(img_bytes)}".encode() + b'\r\n\r\n' + 
+                   img_bytes + b'\r\n')
+        except Exception as e:
+            print(f"Stream error: {e}")
+            time.sleep(0.1)
+            
+        # Contrôle du taux de rafraîchissement (~20-25 images par seconde)
+        time.sleep(0.04)
+
 @app.get("/")
-async def get():
-    return HTMLResponse("""
-    <html>
-        <body>
-            <h1>Stream ESP32-CAM</h1>
-            <img id="stream" src="" style="width: 100%; max-width: 640px;">
-            <script>
-                const img = document.getElementById('stream');
-                // Remplace par ton URL Render (ex: ws://ton-app.render.com/ws/client)
-                const ws = new WebSocket('ws://' + window.location.host + '/ws/client');
-                ws.onmessage = function(event) {
-                    const url = URL.createObjectURL(event.data);
-                    img.src = url;
-                    // Libère la mémoire après le chargement de l'image
-                    img.onload = () => URL.revokeObjectURL(url);
-                };
-            </script>
-        </body>
-    </html>
-    """)
+def index():
+    return StreamingResponse(
+        generate_frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
+# Pour lancer localement si besoin (sur Render, c'est Uvicorn qui gère)
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

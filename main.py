@@ -23,6 +23,7 @@ def get_placeholder_bytes():
         img.save(buf, format='JPEG')
         return buf.getvalue()
 
+# Initialisation propre
 latest_image_bytes = get_placeholder_bytes()
 
 def is_valid_image(image_bytes):
@@ -33,13 +34,15 @@ def is_valid_image(image_bytes):
         print("image invalid")
         return False
 
-@app.websocket("/")
+# --- 1. ROUTE WEBSOCKET (Remplace receive_stream.py) ---
+@app.websocket("/") # ou "/ws" selon ce que vous avez choisi
 async def websocket_endpoint(websocket: WebSocket):
     global latest_image_bytes
     await websocket.accept()
     print("ESP32 connected!")
     try:
         while True:
+            # On récupère le message sous forme brute (message de type dict ou objet selon FastAPI)
             message = await websocket.receive()
             
             # FastAPI/Starlette renvoie un dict avec 'bytes' ou 'text'
@@ -64,6 +67,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"WebSocket error: {e}")
 
+# --- 2. ROUTE HTTP STREAMING (Remplace send_image_stream.py) ---
 def generate_frames():
     global latest_image_bytes
     while True:
@@ -71,6 +75,7 @@ def generate_frames():
             # S'assurer qu'on a bien des octets valides
             frame_data = latest_image_bytes if latest_image_bytes else get_placeholder_bytes()
             
+            # Valider et réencoder proprement l'image en JPEG via Pillow
             image = Image.open(BytesIO(frame_data))
             img_io = BytesIO()
             image.save(img_io, 'JPEG', quality=80)

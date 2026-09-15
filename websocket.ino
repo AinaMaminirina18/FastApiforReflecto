@@ -1,15 +1,9 @@
 #include "esp_camera.h"
 #include <WiFi.h>
-#include <ArduinoWebsockets.h>
-#include "esp_timer.h"
-#include "img_converters.h"
-#include "fb_gfx.h"
-#include "soc/soc.h" //disable brownout problems
-#include "soc/rtc_cntl_reg.h" //disable brownout problems
-#include "driver/gpio.h"
+#include <WebSocketsClient.h>
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
 
-
-// configuration for AI Thinker Camera board
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM      0
@@ -28,24 +22,36 @@
 #define PCLK_GPIO_NUM     22
 
 
+const char *ssid = "Sugar.Not_Daddyy";
+const char *password = "123456789";
 
-const char* ssid     = "LANDY"; // CHANGE HERE
-const char* password = "Ras24Sand"; // CHANGE HERE
+//const char* websockets_server_host = "172.20.10.2"; 
+//const uint16_t websockets_server_port = 8000;
+//const char* websockets_server_path = "/";
 
-const char* websockets_server_host = "192.168.88.2"; //CHANGE HERE
-const uint16_t websockets_server_port = 8000; // OPTIONAL CHANGE
+WebSocketsClient webSocket;
+bool wsConnected = false;
 
-camera_fb_t * fb = NULL;
-size_t _jpg_buf_len = 0;
-uint8_t * _jpg_buf = NULL;
-uint8_t state = 0;
-
-using namespace websockets;
-WebsocketsClient client;
-
-void onMessageCallback(WebsocketsMessage message) {
-  Serial.print("Got Message: ");
-  Serial.println(message.data());
+void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_DISCONNECTED:
+      wsConnected = false;
+      Serial.println("[WS] Déconnecté");
+      break;
+    case WStype_CONNECTED:
+      wsConnected = true;
+      Serial.println("[WS] Connecté au serveur");
+      webSocket.sendTXT("hello from ESP32 camera stream!");
+      break;
+    case WStype_TEXT:
+      Serial.printf("[WS] Message reçu : %s\n", payload);
+      break;
+    case WStype_ERROR:
+      Serial.println("[WS] Erreur");
+      break;
+    default:
+      break;
+  }
 }
 
 esp_err_t init_camera() {
@@ -71,13 +77,10 @@ esp_err_t init_camera() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
 
-  // parameters for image quality and size
   config.frame_size = FRAMESIZE_VGA; // FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA
-  config.jpeg_quality = 15; //10-63 lower number means higher quality
+  config.jpeg_quality = 15; // 10-63, plus bas = meilleure qualité
   config.fb_count = 2;
-  
-  
-  // Camera init
+
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("camera init FAIL: 0x%x", err);
@@ -87,36 +90,19 @@ esp_err_t init_camera() {
   s->set_framesize(s, FRAMESIZE_VGA);
   Serial.println("camera init OK");
   return ESP_OK;
-};
+}
 
-
-esp_err_t init_wifi() {
+void init_wifi() {
   WiFi.begin(ssid, password);
-  Serial.println("Wifi init ");
+  Serial.print("Connexion WiFi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("");
-  Serial.println("WiFi OK");
-  Serial.println("connecting to WS: ");
-  client.onMessage(onMessageCallback);
-  bool connected = client.connect(websockets_server_host, websockets_server_port, "/");
-  if (!connected) {
-    Serial.println("WS connect failed!");
-    Serial.println(WiFi.localIP());
-    state = 3;
-    return ESP_FAIL;
-  }
-  if (state == 3) {
-    return ESP_FAIL;
-  }
-
-  Serial.println("WS OK");
-  client.send("hello from ESP32 camera stream!");
-  return ESP_OK;
-};
-
+  Serial.println();
+  Serial.print("WiFi OK, IP ESP32 : ");
+  Serial.println(WiFi.localIP());
+}
 
 void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
@@ -126,19 +112,25 @@ void setup() {
 
   init_camera();
   init_wifi();
+
+  //webSocket.begin(websockets_server_host, websockets_server_port, websockets_server_path);
+  webSocket.beginSSL("fastapiforreflecto.onrender.com", 443, "/");
+  webSocket.onEvent(webSocketEvent);
+  webSocket.setReconnectInterval(3000);
 }
 
 void loop() {
-  if (client.available()) {
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb) {
-      Serial.println("img capture failed");
-      esp_camera_fb_return(fb);
-      ESP.restart();
-    }
-    client.sendBinary((const char*) fb->buf, fb->len);
-    Serial.println("image sent");
-    esp_camera_fb_return(fb);
-    client.poll();
+  webSocket.loop();
+
+  if (!wsConnected) return;
+
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("img capture failed");
+    ESP.restart();
+    return;
   }
+
+  webSocket.sendBIN(fb->buf, fb->len);
+  esp_camera_fb_return(fb);
 }

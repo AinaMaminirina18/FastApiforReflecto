@@ -1,8 +1,10 @@
 #include "esp_camera.h"
 #include <WiFi.h>
 #include <WebSocketsClient.h>
+#include <WiFiManager.h>   
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
+
 
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
@@ -22,13 +24,11 @@
 #define PCLK_GPIO_NUM     22
 
 
-const char *ssid = "Sugar.Not_Daddyy";
-const char *password = "123456789";
+const char* websockets_server_host = "fastapiforreflecto.onrender.com";
+const uint16_t websockets_server_port = 443;
+const char* websockets_server_path = "/";
 
-//const char* websockets_server_host = "172.20.10.2"; 
-//const uint16_t websockets_server_port = 8000;
-//const char* websockets_server_path = "/";
-
+WiFiManager wm;
 WebSocketsClient webSocket;
 bool wsConnected = false;
 
@@ -77,8 +77,8 @@ esp_err_t init_camera() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
 
-  config.frame_size = FRAMESIZE_VGA; // FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA
-  config.jpeg_quality = 15; // 10-63, plus bas = meilleure qualité
+  config.frame_size = FRAMESIZE_VGA;
+  config.jpeg_quality = 15;
   config.fb_count = 2;
 
   esp_err_t err = esp_camera_init(&config);
@@ -92,14 +92,17 @@ esp_err_t init_camera() {
   return ESP_OK;
 }
 
-void init_wifi() {
-  WiFi.begin(ssid, password);
-  Serial.print("Connexion WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+void setup_wifi() {
+  wm.setConfigPortalTimeout(180);
+
+  bool connected = wm.autoConnect("ESP32-CAM-Setup");
+
+  if (!connected) {
+    Serial.println("Échec de connexion WiFi, redémarrage...");
+    delay(3000);
+    ESP.restart();
   }
-  Serial.println();
+
   Serial.print("WiFi OK, IP ESP32 : ");
   Serial.println(WiFi.localIP());
 }
@@ -111,10 +114,9 @@ void setup() {
   Serial.setDebugOutput(true);
 
   init_camera();
-  init_wifi();
+  setup_wifi();
 
-  //webSocket.begin(websockets_server_host, websockets_server_port, websockets_server_path);
-  webSocket.beginSSL("fastapiforreflecto.onrender.com", 443, "/");
+  webSocket.beginSSL(websockets_server_host, websockets_server_port, websockets_server_path);
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(3000);
 }
